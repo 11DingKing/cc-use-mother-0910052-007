@@ -39,11 +39,12 @@ from app.middleware.logging_middleware import register_logging_middleware
 register_logging_middleware(app)
 
 # 注册控制器路由
-from app.controllers import stock_router, analysis_router, watchlist_router, backtest_router, trading_router
+from app.controllers import stock_router, analysis_router, watchlist_router, backtest_router, trading_router, snapshot_router
 app.include_router(stock_router)
 app.include_router(analysis_router)
 app.include_router(watchlist_router)
 app.include_router(backtest_router)
+app.include_router(snapshot_router)
 app.include_router(trading_router)
 
 

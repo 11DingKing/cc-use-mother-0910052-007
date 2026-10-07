@@ -1,7 +1,7 @@
 """业务模块说明。"""
 
 from datetime import datetime
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Callable
 from dataclasses import dataclass, field
 import logging
 import statistics
@@ -9,6 +9,10 @@ import statistics
 from app.chan.models import Signal, SignalType, RawCandle
 
 logger = logging.getLogger(__name__)
+
+
+class BacktestCancelled(Exception):
+    """回测在协作式取消点被请求终止。"""
 
 
 @dataclass
@@ -148,26 +152,33 @@ class BacktestEngine:
         config: BacktestConfig,
         candles: List[RawCandle],
         signals: List[Signal],
+        should_cancel: Optional[Callable[[], bool]] = None,
     ) -> BacktestResult:
-        """业务模块说明。"""
+        """业务模块说明。
+
+        ``should_cancel`` 为可选的协作式取消点：每根 K 线计算前调用一次，
+        返回 True 时抛出 :class:`BacktestCancelled`，不产生结果，可安全重试。
+        """
         self.position = 0.0
         self.capital = config.initial_capital
         self.trades = []
         self.equity_curve = []
-        
+
         candles = sorted(candles, key=lambda x: x.timestamp)
         signals = sorted(signals, key=lambda x: x.timestamp)
-        
+
         signal_map = {}
         for s in signals:
             date_key = s.timestamp.strftime("%Y-%m-%d")
             signal_map[date_key] = s
-        
+
         logger.info(f"Backtest signals: {len(signals)}, signal_dates: {list(signal_map.keys())}")
-        
+
         current_trade: Optional[Trade] = None
-        
+
         for candle in candles:
+            if should_cancel is not None and should_cancel():
+                raise BacktestCancelled("回测被取消")
             candle_date = candle.timestamp.strftime("%Y-%m-%d")
             signal = signal_map.get(candle_date)
             

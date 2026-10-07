@@ -71,14 +71,42 @@ def init_database():
     from app.entities.analysis_result import Base as AnalysisBase
     from app.entities.watchlist import Base as WatchlistBase
     from app.entities.backtest import Base as BacktestBase
-    
+
     engine = get_engine()
-    
+
     # 创建所有表
     StockBase.metadata.create_all(bind=engine)
     AnalysisBase.metadata.create_all(bind=engine)
     WatchlistBase.metadata.create_all(bind=engine)
     BacktestBase.metadata.create_all(bind=engine)
+
+    # 轻量迁移：为已存在的旧表补齐新增列（SQLite 不自动升级表结构）
+    _ensure_columns(
+        engine,
+        "backtest_results",
+        {
+            "snapshot_id": "VARCHAR(80)",
+            "run_id": "VARCHAR(48)",
+            "account_id": "VARCHAR(64)",
+            "content_fingerprint": "VARCHAR(64)",
+            "completeness": "VARCHAR(20)",
+            "input_lock_json": "TEXT",
+        },
+    )
+
+
+def _ensure_columns(engine, table_name: str, columns: dict):
+    """对 SQLite/通用后端幂等地补齐缺失列。"""
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    existing = {col["name"] for col in inspector.get_columns(table_name)}
+    with engine.begin() as conn:
+        for name, ddl_type in columns.items():
+            if name not in existing:
+                conn.execute(
+                    text(f"ALTER TABLE {table_name} ADD COLUMN {name} {ddl_type}")
+                )
 
 # 数据源配置
 DATA_SOURCE_CONFIG = {

@@ -7,25 +7,33 @@ import logging
 
 from app.config import db_session_scope
 from app.entities.backtest import BacktestResult as BacktestResultEntity
-from app.backtest.engine import BacktestEngine, BacktestConfig, BacktestResult
+from app.backtest.engine import BacktestEngine, BacktestResult
 from app.backtest.report import BacktestReportGenerator
 from app.services.stock_service import StockService
 from app.services.analysis_service import AnalysisService
+from app.snapshot.runner import SnapshotBacktestRunner
 from app.utils.validators import validate_stock_code, validate_time_range, validate_period
 from app.middleware.exception_handler import NotFoundException, AnalysisException
 
 logger = logging.getLogger(__name__)
 
+# 未显式指定账户的旧版 /run 接口归入默认账户，同样受到快照隔离约束
+DEFAULT_BACKTEST_ACCOUNT = "default"
+
 
 class BacktestService:
     """业务模块说明。"""
-    
+
     def __init__(self):
         self.stock_service = StockService()
         self.analysis_service = AnalysisService()
         self.engine = BacktestEngine()
         self.report_generator = BacktestReportGenerator()
-    
+        # 快照化编排器（与新接口共享归档目录）
+        self.snapshot_runner = SnapshotBacktestRunner(
+            stock_service=self.stock_service
+        )
+
     def run_backtest(
         self,
         stock_code: str,
@@ -34,65 +42,32 @@ class BacktestService:
         end_date: Optional[datetime] = None,
         initial_capital: float = 100000.0,
         position_size: float = 1.0,
+        account_id: str = DEFAULT_BACKTEST_ACCOUNT,
     ) -> Dict[str, Any]:
-        """业务模块说明。"""
+        """旧版入口：内部改为"先封存不可变输入快照，再执行"。
+
+        这样同名回测在行情补录/参数调整后再次运行也不会覆盖历史口径：
+        每次运行绑定各自的快照，报告可按快照精确复现。
+        """
         stock_code = validate_stock_code(stock_code)
         period = validate_period(period)
         start_date, end_date = validate_time_range(start_date, end_date)
-        
-        # 创建回测配置
-        config = BacktestConfig(
-            stock_code=stock_code,
-            period=period,
-            start_date=start_date,
-            end_date=end_date,
-            initial_capital=initial_capital,
-            position_size=position_size,
-        )
-        
+
         try:
-            # 获取K线数据
-            candles = self.stock_service.get_candles(
-                stock_code, period, start_date, end_date
+            locked = self.snapshot_runner.build_snapshot(
+                account_id=account_id,
+                stock_code=stock_code,
+                period=period,
+                start_date=start_date,
+                end_date=end_date,
+                params={
+                    "initial_capital": initial_capital,
+                    "position_size": position_size,
+                },
             )
-            
-            if not candles:
-                raise AnalysisException(
-                    message="No candle data available for backtest",
-                    stock_code=stock_code,
-                    period=period,
-                )
-            
-            # 执行分析获取信号（使用完整数据范围以获得更多信号）
-            self.analysis_service.run_analysis(stock_code, period, None, None)
-            
-            # 获取信号
-            with db_session_scope() as session:
-                from app.mappers.analysis_mapper import AnalysisMapper
-                mapper = AnalysisMapper(session)
-                analysis_result = mapper.get_latest(stock_code, period)
-                
-                if not analysis_result:
-                    raise AnalysisException(
-                        message="No analysis result available",
-                        stock_code=stock_code,
-                        period=period,
-                    )
-                
-                signals = mapper.load_signals(analysis_result)
-            
-            # 执行回测
-            result = self.engine.run(config, candles, signals)
-            
-            # 保存结果
-            result_id = self._save_result(result)
-            
-            # 生成报告
-            report = self.report_generator.generate(result)
-            report["id"] = result_id
-            
-            return report
-            
+            return self.snapshot_runner.run_sync(
+                account_id, locked["snapshot_id"]
+            )
         except AnalysisException:
             raise
         except Exception as e:

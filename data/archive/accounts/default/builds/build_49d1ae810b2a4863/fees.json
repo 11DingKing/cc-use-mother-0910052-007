@@ -1,0 +1,8 @@
+{
+  "commission_rate": 0.001,
+  "fee_model": "bilateral_commission_v1",
+  "fees_hash": "75896a846946da3d86a29d86b907d45d837b00175b2e7871714f5f4a0173ca5d",
+  "initial_capital": 100000.0,
+  "position_size": 1.0,
+  "slippage": 0.001
+}

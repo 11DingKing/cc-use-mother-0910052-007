@@ -44,14 +44,23 @@ class BacktestResult(Base):
     equity_curve_json = Column(Text, nullable=True)
     
     # 元数据
-    status = Column(String(20), default="pending")  # pending, running, completed, failed
+    status = Column(String(20), default="pending")  # pending, running, completed, failed, cancelled
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     completed_at = Column(DateTime, nullable=True)
-    
+
+    # 不可变输入快照关联
+    snapshot_id = Column(String(80), nullable=True, index=True)
+    run_id = Column(String(48), nullable=True, index=True)
+    account_id = Column(String(64), nullable=True, index=True)
+    content_fingerprint = Column(String(64), nullable=True)
+    completeness = Column(String(20), nullable=True)  # complete, partial, unverified
+    input_lock_json = Column(Text, nullable=True)     # 锁定输入清单的 JSON 副本
+
     __table_args__ = (
         Index('ix_backtest_stock_period', 'stock_code', 'period'),
         Index('ix_backtest_status', 'status'),
+        Index('ix_backtest_account_run', 'account_id', 'run_id'),
     )
     
     def __repr__(self):

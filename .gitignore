@@ -10,3 +10,7 @@ coverage/
 __pycache__/
 *.py[cod]
 .DS_Store
+
+# 本地数据库与回测快照归档
+*.db
+data/archive/

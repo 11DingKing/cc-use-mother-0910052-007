@@ -1,0 +1,21 @@
+{
+  "code_version": "code-3efd1970e161",
+  "detector_chain": [
+    "KLineProcessor.clean",
+    "KLineProcessor.merge",
+    "FractalDetector.detect",
+    "BiDetector.detect",
+    "DuanDetector.detect",
+    "ZhongshuDetector.detect",
+    "SignalDetector.detect_all",
+    "BacktestEngine.run"
+  ],
+  "param_aliases": {},
+  "params": {
+    "commission_rate": 0.001,
+    "initial_capital": 100000.0,
+    "position_size": 1.0,
+    "slippage": 0.001
+  },
+  "params_hash": "dc055901b2c87846c7b140dab08ee2dad829b1ee66e5e3170c7e3feaa3fb53b2"
+}
