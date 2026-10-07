@@ -51,34 +51,23 @@ class AnalysisService:
             candles = self.stock_service.get_candles(
                 stock_code, period, start_date, end_date
             )
-            
+
             if not candles:
                 raise AnalysisException(
                     message="No candle data available",
                     stock_code=stock_code,
                     period=period,
                 )
-            
-            # 清洗和合并K线
-            cleaned, _ = self.kline_processor.clean(candles)
-            merged = self.kline_processor.merge(cleaned)
-            
-            # 识别分型
-            fractals = self.fractal_detector.detect(merged)
-            
-            # 识别笔
-            bis = self.bi_detector.detect(fractals, merged)
-            
-            # 识别段
-            duans = self.duan_detector.detect(bis)
-            
-            # 识别中枢
-            zhongshus = self.zhongshu_detector.detect(bis)
-            
-            # 识别买卖点
-            signal_detector = SignalDetector(stock_code, period)
-            signals = signal_detector.detect_all(bis, duans, zhongshus)
-            
+
+            # 在给定K线上执行完整分析管线
+            pipeline = self.analyze_candles(stock_code, period, candles)
+            merged = pipeline["merged"]
+            fractals = pipeline["fractals"]
+            bis = pipeline["bis"]
+            duans = pipeline["duans"]
+            zhongshus = pipeline["zhongshus"]
+            signals = pipeline["signals"]
+
             # 保存结果
             self._save_result(
                 stock_code, period, start_date, end_date,
@@ -108,6 +97,46 @@ class AnalysisService:
                 period=period,
             )
     
+    def analyze_candles(
+        self,
+        stock_code: str,
+        period: str,
+        candles: List,
+    ) -> Dict[str, Any]:
+        """在给定的K线序列上执行完整缠论分析管线（不取数、不落库）。
+
+        供快照创建使用：信号必须严格来自被冻结的行情片段，
+        保证快照之后的行情补录不会改变该快照的信号集合。
+        """
+        # 清洗和合并K线
+        cleaned, _ = self.kline_processor.clean(candles)
+        merged = self.kline_processor.merge(cleaned)
+
+        # 识别分型
+        fractals = self.fractal_detector.detect(merged)
+
+        # 识别笔
+        bis = self.bi_detector.detect(fractals, merged)
+
+        # 识别段
+        duans = self.duan_detector.detect(bis)
+
+        # 识别中枢
+        zhongshus = self.zhongshu_detector.detect(bis)
+
+        # 识别买卖点
+        signal_detector = SignalDetector(stock_code, period)
+        signals = signal_detector.detect_all(bis, duans, zhongshus)
+
+        return {
+            "merged": merged,
+            "fractals": fractals,
+            "bis": bis,
+            "duans": duans,
+            "zhongshus": zhongshus,
+            "signals": signals,
+        }
+
     def _save_result(
         self,
         stock_code: str,

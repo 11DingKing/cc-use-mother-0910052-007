@@ -1,7 +1,7 @@
 """业务模块说明。"""
 
 from datetime import datetime
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Callable
 from dataclasses import dataclass, field
 import logging
 import statistics
@@ -9,6 +9,42 @@ import statistics
 from app.chan.models import Signal, SignalType, RawCandle
 
 logger = logging.getLogger(__name__)
+
+
+class BacktestCancelled(Exception):
+    """回测运行被取消（引擎在每根K线处检查取消标记后抛出）。"""
+
+
+def trade_to_dict(trade: "Trade") -> Dict[str, Any]:
+    """将交易记录序列化为可 JSON 化的字典（用于断点保存）。"""
+    return {
+        "entry_time": trade.entry_time.isoformat(),
+        "entry_price": trade.entry_price,
+        "entry_signal": trade.entry_signal.value if trade.entry_signal else None,
+        "exit_time": trade.exit_time.isoformat() if trade.exit_time else None,
+        "exit_price": trade.exit_price,
+        "exit_signal": trade.exit_signal.value if trade.exit_signal else None,
+        "shares": trade.shares,
+        "profit": trade.profit,
+        "profit_pct": trade.profit_pct,
+        "is_closed": trade.is_closed,
+    }
+
+
+def trade_from_dict(data: Dict[str, Any]) -> "Trade":
+    """从字典恢复交易记录（用于断点续跑）。"""
+    return Trade(
+        entry_time=datetime.fromisoformat(data["entry_time"]),
+        entry_price=data["entry_price"],
+        entry_signal=SignalType(data["entry_signal"]) if data["entry_signal"] else None,
+        exit_time=datetime.fromisoformat(data["exit_time"]) if data["exit_time"] else None,
+        exit_price=data["exit_price"],
+        exit_signal=SignalType(data["exit_signal"]) if data["exit_signal"] else None,
+        shares=data["shares"],
+        profit=data["profit"],
+        profit_pct=data["profit_pct"],
+        is_closed=data["is_closed"],
+    )
 
 
 @dataclass
@@ -148,43 +184,63 @@ class BacktestEngine:
         config: BacktestConfig,
         candles: List[RawCandle],
         signals: List[Signal],
+        resume_state: Optional[Dict[str, Any]] = None,
+        checkpoint_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        checkpoint_every: int = 1,
+        should_cancel: Optional[Callable[[], bool]] = None,
     ) -> BacktestResult:
         """业务模块说明。"""
         self.position = 0.0
         self.capital = config.initial_capital
         self.trades = []
         self.equity_curve = []
-        
+
+        start_index = 0
+        current_trade: Optional[Trade] = None
+
+        # 从断点状态恢复（失败后继续 / 取消后重试），输入必须来自同一快照
+        if resume_state:
+            self.capital = resume_state["capital"]
+            self.position = resume_state["position"]
+            self.trades = [trade_from_dict(t) for t in resume_state["trades"]]
+            self.equity_curve = [dict(e) for e in resume_state["equity_curve"]]
+            start_index = resume_state["next_index"]
+            # 未平仓交易始终是最后一笔，恢复引用以保证平仓时同步更新
+            current_trade = self.trades[-1] if self.trades and not self.trades[-1].is_closed else None
+
         candles = sorted(candles, key=lambda x: x.timestamp)
         signals = sorted(signals, key=lambda x: x.timestamp)
-        
+
         signal_map = {}
         for s in signals:
             date_key = s.timestamp.strftime("%Y-%m-%d")
             signal_map[date_key] = s
-        
+
         logger.info(f"Backtest signals: {len(signals)}, signal_dates: {list(signal_map.keys())}")
-        
-        current_trade: Optional[Trade] = None
-        
-        for candle in candles:
+
+        for index in range(start_index, len(candles)):
+            candle = candles[index]
+
+            if should_cancel is not None and should_cancel():
+                raise BacktestCancelled(f"Backtest cancelled at candle index {index}")
+
             candle_date = candle.timestamp.strftime("%Y-%m-%d")
             signal = signal_map.get(candle_date)
-            
+
             if signal:
                 if signal.signal_type in (SignalType.BUY_1, SignalType.BUY_2, SignalType.BUY_3):
                     if self.position == 0:
                         current_trade = self._open_position(
                             config, candle, signal.signal_type
                         )
-                
+
                 elif signal.signal_type in (SignalType.SELL_1, SignalType.SELL_2, SignalType.SELL_3):
                     if self.position > 0 and current_trade:
                         self._close_position(
                             config, candle, signal.signal_type, current_trade
                         )
                         current_trade = None
-            
+
             equity = self.capital + self.position * candle.close
             self.equity_curve.append({
                 "timestamp": candle.timestamp.isoformat(),
@@ -192,20 +248,35 @@ class BacktestEngine:
                 "position": self.position,
                 "price": candle.close,
             })
-        
+
+            if checkpoint_callback is not None and (
+                (index + 1) % max(checkpoint_every, 1) == 0 or index == len(candles) - 1
+            ):
+                checkpoint_callback(self._snapshot_state(index + 1))
+
         if self.position > 0 and current_trade and candles:
             self._close_position(
                 config, candles[-1], None, current_trade
             )
-        
+
         result = BacktestStatistics.calculate(
             config=config,
             trades=self.trades,
             equity_curve=self.equity_curve,
             final_capital=self.capital,
         )
-        
+
         return result
+
+    def _snapshot_state(self, next_index: int) -> Dict[str, Any]:
+        """导出当前引擎状态（可 JSON 化），用于断点续跑。"""
+        return {
+            "next_index": next_index,
+            "capital": self.capital,
+            "position": self.position,
+            "trades": [trade_to_dict(t) for t in self.trades],
+            "equity_curve": [dict(e) for e in self.equity_curve],
+        }
     
     def _open_position(
         self,

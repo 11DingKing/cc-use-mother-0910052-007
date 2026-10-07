@@ -19,6 +19,7 @@ ERROR_MESSAGES = {
     "VALIDATION_ERROR": "输入参数不正确，请检查后重新提交",
     "NOT_FOUND": "请求的资源不存在",
     "TRADING_ERROR": "交易操作失败，请检查账户状态和订单参数",
+    "CONFLICT": "操作与当前状态冲突，请刷新后重试",
     "VALUE_ERROR": "参数值不符合要求",
     "INTERNAL_ERROR": "服务器内部错误，我们正在处理中",
 }
@@ -229,7 +230,7 @@ class ValidationException(AppException):
 
 class NotFoundException(AppException):
     """业务模块说明。"""
-    
+
     # 资源类型中文映射
     RESOURCE_NAMES = {
         "Stock": "股票",
@@ -237,6 +238,9 @@ class NotFoundException(AppException):
         "Watchlist": "自选股",
         "Order": "订单",
         "Position": "持仓",
+        "BacktestResult": "回测结果",
+        "BacktestRun": "回测运行",
+        "BacktestSnapshot": "回测快照",
     }
     
     def __init__(
@@ -264,6 +268,31 @@ class NotFoundException(AppException):
             message=message,
             code="NOT_FOUND",
             status_code=404,
+            details={
+                "resource_type": resource_type,
+                "resource_id": resource_id,
+                **(details or {}),
+            },
+            user_message=user_msg,
+        )
+
+
+class ConflictException(AppException):
+    """状态冲突（如对已归档/已终态的运行执行非法操作，或并发启动冲突）。"""
+
+    def __init__(
+        self,
+        message: str,
+        resource_type: Optional[str] = None,
+        resource_id: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ):
+        user_msg = message if any('一' <= c <= '鿿' for c in message) else None
+
+        super().__init__(
+            message=message,
+            code="CONFLICT",
+            status_code=409,
             details={
                 "resource_type": resource_type,
                 "resource_id": resource_id,

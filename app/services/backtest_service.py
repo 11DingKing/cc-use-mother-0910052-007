@@ -7,8 +7,9 @@ import logging
 
 from app.config import db_session_scope
 from app.entities.backtest import BacktestResult as BacktestResultEntity
-from app.backtest.engine import BacktestEngine, BacktestConfig, BacktestResult
+from app.backtest.engine import BacktestEngine
 from app.backtest.report import BacktestReportGenerator
+from app.services.backtest_run_service import BacktestRunService, DEFAULT_ACCOUNT_ID
 from app.services.stock_service import StockService
 from app.services.analysis_service import AnalysisService
 from app.utils.validators import validate_stock_code, validate_time_range, validate_period
@@ -19,13 +20,14 @@ logger = logging.getLogger(__name__)
 
 class BacktestService:
     """业务模块说明。"""
-    
+
     def __init__(self):
         self.stock_service = StockService()
         self.analysis_service = AnalysisService()
         self.engine = BacktestEngine()
         self.report_generator = BacktestReportGenerator()
-    
+        self.run_service = BacktestRunService()
+
     def run_backtest(
         self,
         stock_code: str,
@@ -35,13 +37,18 @@ class BacktestService:
         initial_capital: float = 100000.0,
         position_size: float = 1.0,
     ) -> Dict[str, Any]:
-        """业务模块说明。"""
+        """执行回测。
+
+        所有运行都绑定一份不可变输入快照（行情片段、策略版本、
+        交易日历、费用口径），保证同名回测在不同时间运行可复核。
+        """
         stock_code = validate_stock_code(stock_code)
         period = validate_period(period)
         start_date, end_date = validate_time_range(start_date, end_date)
-        
-        # 创建回测配置
-        config = BacktestConfig(
+
+        report = self.run_service.start_run(
+            account_id=DEFAULT_ACCOUNT_ID,
+            name=f"{stock_code}:{period}",
             stock_code=stock_code,
             period=period,
             start_date=start_date,
@@ -49,104 +56,20 @@ class BacktestService:
             initial_capital=initial_capital,
             position_size=position_size,
         )
-        
-        try:
-            # 获取K线数据
-            candles = self.stock_service.get_candles(
-                stock_code, period, start_date, end_date
-            )
-            
-            if not candles:
-                raise AnalysisException(
-                    message="No candle data available for backtest",
-                    stock_code=stock_code,
-                    period=period,
-                )
-            
-            # 执行分析获取信号（使用完整数据范围以获得更多信号）
-            self.analysis_service.run_analysis(stock_code, period, None, None)
-            
-            # 获取信号
-            with db_session_scope() as session:
-                from app.mappers.analysis_mapper import AnalysisMapper
-                mapper = AnalysisMapper(session)
-                analysis_result = mapper.get_latest(stock_code, period)
-                
-                if not analysis_result:
-                    raise AnalysisException(
-                        message="No analysis result available",
-                        stock_code=stock_code,
-                        period=period,
-                    )
-                
-                signals = mapper.load_signals(analysis_result)
-            
-            # 执行回测
-            result = self.engine.run(config, candles, signals)
-            
-            # 保存结果
-            result_id = self._save_result(result)
-            
-            # 生成报告
-            report = self.report_generator.generate(result)
-            report["id"] = result_id
-            
-            return report
-            
-        except AnalysisException:
-            raise
-        except Exception as e:
-            logger.error(f"Backtest error: {e}", exc_info=True)
+
+        if report["status"] != "completed":
             raise AnalysisException(
-                message=f"Backtest failed: {str(e)}",
+                message=report["error_message"] or "Backtest failed",
                 stock_code=stock_code,
                 period=period,
             )
-    
-    def _save_result(self, result: BacktestResult) -> int:
-        """业务模块说明。"""
-        try:
-            with db_session_scope() as session:
-                entity = BacktestResultEntity(
-                    stock_code=result.config.stock_code,
-                    period=result.config.period,
-                    start_date=result.config.start_date,
-                    end_date=result.config.end_date,
-                    initial_capital=result.config.initial_capital,
-                    final_capital=result.final_capital,
-                    total_return=result.total_return,
-                    annual_return=result.annual_return,
-                    max_drawdown=result.max_drawdown,
-                    win_rate=result.win_rate,
-                    profit_loss_ratio=result.profit_loss_ratio,
-                    sharpe_ratio=result.sharpe_ratio,
-                    total_trades=result.total_trades,
-                    winning_trades=result.winning_trades,
-                    losing_trades=result.losing_trades,
-                    trades_json=json.dumps([
-                        {
-                            "entry_time": t.entry_time.isoformat(),
-                            "entry_price": t.entry_price,
-                            "entry_signal": t.entry_signal.value if t.entry_signal else None,
-                            "exit_time": t.exit_time.isoformat() if t.exit_time else None,
-                            "exit_price": t.exit_price,
-                            "exit_signal": t.exit_signal.value if t.exit_signal else None,
-                            "shares": t.shares,
-                            "profit": t.profit,
-                            "profit_pct": t.profit_pct,
-                        }
-                        for t in result.trades
-                    ]),
-                    equity_curve_json=json.dumps(result.equity_curve),
-                    status="completed",
-                    completed_at=datetime.utcnow(),
-                )
-                session.add(entity)
-                session.flush()
-                return entity.id
-        except Exception as e:
-            logger.warning(f"Save backtest result error: {e}")
-            return 0
+
+        result = self.get_result(report["result"]["result_id"])
+        result["snapshot_id"] = report["snapshot_id"]
+        result["run_id"] = report["run_id"]
+        result["inputs_locked"] = report["inputs_locked"]
+        result["is_complete"] = report["is_complete"]
+        return result
     
     def get_result(self, result_id: int) -> Dict[str, Any]:
         """业务模块说明。"""
